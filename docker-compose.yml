@@ -1,0 +1,25 @@
+name: event-platform
+services: 
+  db: 
+    image: postgres:18
+    restart: always
+    shm_size: 128mb
+    ports: 
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: event-platform
+      POSTGRES_USER: event-platform
+      POSTGRES_PASSWORD: stonybrook123
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "event-platform"]
+    volumes: 
+      - db-data:/var/lib/postgresql
+
+  cache: 
+    image: redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+volumes:
+  db-data:
