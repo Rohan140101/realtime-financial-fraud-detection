@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"event-platform/internal/models"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	kafkaConfig "event-platform/internal/kafka"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/joho/godotenv"
 )
 
@@ -22,6 +25,14 @@ func main() {
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
+
+	// Initializing DB Connection
+	conn, err := pgx.Connect(context.Background(), os.Getenv("DB_URL"))
+	if err != nil {
+		fmt.Printf("Failed to Connect to DB\n")
+		os.Exit(1)
+	}
+	defer conn.Close(context.Background())
 
 	producerConfig := kafkaConfig.GetProducerConfig()
 	producer, err := kafka.NewProducer(&producerConfig)
@@ -48,6 +59,8 @@ func main() {
 	r := gin.Default()
 	topic := "events"
 
+	// POST Endpoints
+	// Post Events Endpoint
 	r.POST("/events", func(c *gin.Context) {
 		var eventJson models.Event
 
@@ -68,6 +81,50 @@ func main() {
 			Value:          eventJsonBytes,
 		}, nil)
 		c.JSON(http.StatusAccepted, gin.H{"uuid": new_uuid})
+
+	})
+
+	// GET Endpoints
+	// events/summary
+
+	r.GET("/events/summary", func(c *gin.Context) {
+		fmt.Println("Entering Event Summary API")
+		var eventSummary models.EventSummary
+		// Getting Types and Counts
+		rows, err := conn.Query(context.Background(), `SELECT type, COUNT(id) count FROM EVENTS GROUP BY type order BY COUNT DESC;`)
+		if err != nil {
+			fmt.Printf("Error While Computing Summary of Events: %v\n", err)
+		}
+		var txnType string
+		var count int32
+		eventSummary.ByType = map[string]int32{}
+		_, err = pgx.ForEachRow(rows, []any{&txnType, &count}, func() error {
+			eventSummary.ByType[txnType] = count
+			return nil
+		})
+
+		if err != nil {
+			fmt.Printf("Error While Fetching Rows of Events: %v\n", err)
+		}
+
+		// Getting Max Timestamps and overall number of events
+
+		rows, err = conn.Query(context.Background(), `SELECT MAX(timestamp) as maxTs, COUNT(id) as count FROM EVENTS;`)
+		if err != nil {
+			fmt.Printf("Error While Computing Summary of Events: %v\n", err)
+		}
+		_, err = pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (int32, error) {
+
+			var totalEvents int32
+			var latestEvent time.Time
+
+			err = row.Scan(&latestEvent, &totalEvents)
+			eventSummary.TotalEvents = totalEvents
+			eventSummary.LatestEvent = latestEvent
+			return c.GetInt32(1), err
+		})
+
+		c.JSON(http.StatusAccepted, eventSummary)
 
 	})
 
