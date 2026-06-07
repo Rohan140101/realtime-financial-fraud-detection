@@ -91,13 +91,13 @@ docker exec -it event-platform-db-1 psql -U event-platform -d event-platform -c 
 
 ## Running the Project
 
-**Terminal 1 — start the API server (producer):**
+**Terminal 1 (start the API server (producer)):**
 
 ```bash
 go run cmd/api/main.go
 ```
 
-**Terminal 2 — start the consumer:**
+**Terminal 2 (start the consumer)**
 
 ```bash
 go run cmd/consumer/main.go
@@ -105,7 +105,7 @@ go run cmd/consumer/main.go
 
 Once both are running, send events via curl:
 
-**POST /events** — ingest a new financial transaction event:
+**POST /events** (ingest a new financial transaction event):
 
 ```bash
 curl -X POST http://localhost:8080/events \
@@ -118,7 +118,7 @@ Expected response:
 {"uuid":"bc761dca-9567-4e37-aba1-352660572154"}
 ```
 
-**GET /events/summary** — retrieve aggregated analytics across all events:
+**GET /events/summary** (retrieve aggregated analytics across all events):
 
 ```bash
 curl http://localhost:8080/events/summary
