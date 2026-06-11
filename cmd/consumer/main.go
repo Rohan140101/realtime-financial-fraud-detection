@@ -22,6 +22,64 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+func detectFraud(rdb *redis.Client, event *models.Event, threshold int, expireTime int) (bool, string, int) {
+	accountId, exists := extractAccountId(event.Payload)
+	if exists {
+		key := fmt.Sprintf("fraud:account:%s", accountId)
+		val := rdb.Incr(context.Background(), key).Val()
+		if val == int64(1) {
+			rdb.Expire(context.Background(), key, time.Duration(expireTime)*time.Second)
+		}
+		return val >= int64(threshold), accountId, int(val)
+	}
+	return false, accountId, 0
+
+}
+
+func publishFraudAlert(producer *kafka.Producer, event *models.Event, accountId string, count int) {
+	fraudTopic := "fraud-alerts"
+	fmt.Printf("Fraud Account Found: account_id: %s, Count: %d, Event ID: %s\n",
+		accountId, count, event.Id)
+
+	// Generating Fraud Alert Message
+	new_uuid := uuid.New().String()
+	var fraudAlert models.FraudAlert = models.FraudAlert{
+		AlertId:          new_uuid,
+		AccountId:        accountId,
+		EventId:          event.Id,
+		EventType:        event.Type,
+		TransactionCount: count,
+		DetectedAt:       time.Now(),
+	}
+	fraudAlertBytes, err := json.Marshal(fraudAlert)
+	if err != nil {
+		fmt.Printf("Error while marshalling event json: %s\n", err)
+	}
+
+	producer.Produce(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &fraudTopic, Partition: kafka.PartitionAny},
+		Key:            []byte(fraudAlert.AccountId),
+		Value:          fraudAlertBytes,
+	}, nil)
+
+}
+
+func extractAccountId(payload map[string]interface{}) (string, bool) {
+	accountId, exists := payload["sender"]
+	if exists {
+		return accountId.(string), exists
+	}
+	accountId, exists = payload["accountId"]
+	return accountId.(string), exists
+}
+
+func insertEvent(pool *pgxpool.Pool, event *models.Event) {
+	_, err := pool.Exec(context.Background(), "INSERT INTO EVENTS (id, type, timestamp, payload) values ($1, $2, $3, $4::jsonb) ON CONFLICT (id) DO NOTHING", event.Id, event.Type, event.Timestamp, event.Payload)
+	if err != nil {
+		fmt.Printf("Error while Inserting Consumed Event in DB: %v", err)
+	}
+}
+
 func main() {
 
 	topic := "events"
@@ -65,6 +123,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	expireTime, _ := strconv.Atoi(os.Getenv("FRAUD_WINDOW_SECONDS"))
+	threshold, _ := strconv.Atoi(os.Getenv("FRAUD_THRESHOLD"))
+
 	err = cons.SubscribeTopics([]string{topic}, nil)
 	if err != nil {
 		fmt.Printf("Consumer Error in Subscribing to Topics: %v\n", err)
@@ -72,6 +133,7 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	run := true
+
 	for run {
 		select {
 		case sig := <-sigChan:
@@ -91,50 +153,13 @@ func main() {
 				log.Printf("Error unmarshaling JSON: %v", err)
 			}
 
-			// Check For Fraud
-			accountId, exists := eventJson.Payload["accountId"]
-			expireTime, _ := strconv.Atoi(os.Getenv("FRAUD_WINDOW_SECONDS"))
-			threshold, _ := strconv.Atoi(os.Getenv("FRAUD_THRESHOLD"))
-			if exists {
-				key := fmt.Sprintf("fraud:account:%s", accountId.(string))
-				val := rdb.Incr(context.Background(), key).Val()
-				if val == int64(1) {
-					rdb.Expire(context.Background(), key, time.Duration(expireTime)*time.Second)
-				}
-				if val >= int64(threshold) {
-					fraudTopic := "fraud-alerts"
-					fmt.Printf("Fraud Account Found: account_id: %s, Count: %d, Event ID: %s\n",
-						key, val, eventJson.Id)
+			ifFraud, accountId, count := detectFraud(rdb, &eventJson, threshold, expireTime)
 
-					// Generating Fraud Alert Message
-					new_uuid := uuid.New().String()
-					var fraudAlert models.FraudAlert = models.FraudAlert{
-						AlertId:          new_uuid,
-						AccountId:        accountId.(string),
-						EventId:          eventJson.Id,
-						EventType:        eventJson.Type,
-						TransactionCount: int(val),
-						DetectedAt:       time.Now(),
-					}
-					fraudAlertBytes, err := json.Marshal(fraudAlert)
-					if err != nil {
-						fmt.Printf("Error while marshalling event json: %s\n", err)
-					}
-
-					producer.Produce(&kafka.Message{
-						TopicPartition: kafka.TopicPartition{Topic: &fraudTopic, Partition: kafka.PartitionAny},
-						Key:            []byte(fraudAlert.EventId),
-						Value:          fraudAlertBytes,
-					}, nil)
-
-				}
-
+			if ifFraud {
+				publishFraudAlert(producer, &eventJson, accountId, count)
 			}
 
-			_, err = pool.Exec(context.Background(), "INSERT INTO EVENTS (id, type, timestamp, payload) values ($1, $2, $3, $4::jsonb) ON CONFLICT (id) DO NOTHING", eventJson.Id, eventJson.Type, eventJson.Timestamp, eventJson.Payload)
-			if err != nil {
-				fmt.Printf("Error while Inserting Consumed Event in DB: %v", err)
-			}
+			insertEvent(pool, &eventJson)
 
 		}
 

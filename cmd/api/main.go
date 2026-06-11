@@ -20,6 +20,18 @@ import (
 	"github.com/joho/godotenv"
 )
 
+func publishEvent(producer *kafka.Producer, topic string, event *models.Event) {
+	eventJsonBytes, err := json.Marshal(event)
+	if err != nil {
+		fmt.Printf("Error while marshalling event json: %s\n", err)
+	}
+
+	producer.Produce(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+		Key:            []byte(event.Id),
+		Value:          eventJsonBytes,
+	}, nil)
+}
 func main() {
 
 	err := godotenv.Load()
@@ -34,14 +46,6 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
-	// Initializing DB Connection
-	// conn, err := pgx.Connect(context.Background(), os.Getenv("DB_URL"))
-	// conn, err := pool.Acquire(context.Background())
-	// if err != nil {
-	// 	fmt.Printf("Failed to Connect to DB\n")
-	// 	os.Exit(1)
-	// }
-	// defer conn.Release()
 
 	producerConfig := kafkaConfig.GetProducerConfig()
 	producer, err := kafka.NewProducer(&producerConfig)
@@ -79,16 +83,8 @@ func main() {
 		}
 		new_uuid := uuid.New().String()
 		eventJson.Id = new_uuid
-		eventJsonBytes, err := json.Marshal(eventJson)
-		if err != nil {
-			fmt.Printf("Error while marshalling event json: %s\n", err)
-		}
+		publishEvent(producer, topic, &eventJson)
 
-		producer.Produce(&kafka.Message{
-			TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-			Key:            []byte(new_uuid),
-			Value:          eventJsonBytes,
-		}, nil)
 		c.JSON(http.StatusAccepted, gin.H{"uuid": new_uuid})
 
 	})
