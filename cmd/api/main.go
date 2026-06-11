@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 )
 
@@ -26,13 +27,21 @@ func main() {
 		log.Fatal("Error loading .env file")
 	}
 
-	// Initializing DB Connection
-	conn, err := pgx.Connect(context.Background(), os.Getenv("DB_URL"))
+	// Initializing DB Pool
+	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))
 	if err != nil {
-		fmt.Printf("Failed to Connect to DB\n")
+		fmt.Printf("Failed to Initialize Pool\n")
 		os.Exit(1)
 	}
-	defer conn.Close(context.Background())
+	defer pool.Close()
+	// Initializing DB Connection
+	// conn, err := pgx.Connect(context.Background(), os.Getenv("DB_URL"))
+	// conn, err := pool.Acquire(context.Background())
+	// if err != nil {
+	// 	fmt.Printf("Failed to Connect to DB\n")
+	// 	os.Exit(1)
+	// }
+	// defer conn.Release()
 
 	producerConfig := kafkaConfig.GetProducerConfig()
 	producer, err := kafka.NewProducer(&producerConfig)
@@ -91,7 +100,7 @@ func main() {
 		fmt.Println("Entering Event Summary API")
 		var eventSummary models.EventSummary
 		// Getting Types and Counts
-		rows, err := conn.Query(context.Background(), `SELECT type, COUNT(id) count FROM EVENTS GROUP BY type order BY COUNT DESC;`)
+		rows, err := pool.Query(context.Background(), `SELECT type, COUNT(id) count FROM EVENTS GROUP BY type order BY COUNT DESC;`)
 		if err != nil {
 			fmt.Printf("Error While Computing Summary of Events: %v\n", err)
 		}
@@ -109,7 +118,7 @@ func main() {
 
 		// Getting Max Timestamps and overall number of events
 
-		rows, err = conn.Query(context.Background(), `SELECT MAX(timestamp) as maxTs, COUNT(id) as count FROM EVENTS;`)
+		rows, err = pool.Query(context.Background(), `SELECT MAX(timestamp) as maxTs, COUNT(id) as count FROM EVENTS;`)
 		if err != nil {
 			fmt.Printf("Error While Computing Summary of Events: %v\n", err)
 		}

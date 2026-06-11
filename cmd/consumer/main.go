@@ -13,26 +13,48 @@ import (
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"strconv"
+
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
 
+	topic := "events"
+
+	// Loading Env
 	err := godotenv.Load()
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
 
-	topic := "events"
-
-	// Initializing DB Connection
-	conn, err := pgx.Connect(context.Background(), os.Getenv("DB_URL"))
+	// Initializing Postgres DB Pool
+	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))
 	if err != nil {
-		fmt.Printf("Failed to Connect to DB\n")
+		fmt.Printf("Failed to Initialize Pool\n")
 		os.Exit(1)
 	}
-	defer conn.Close(context.Background())
+	defer pool.Close()
+
+	// Initializing Redis
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     os.Getenv("REDIS_URL"),
+		Password: "",
+		DB:       0,
+	})
+
+	_, err = rdb.Ping(context.Background()).Result()
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v\n", err)
+	}
+
+	// Initializing Producer
+	producerConfig := kafkaConfig.GetProducerConfig()
+	producer, err := kafka.NewProducer(&producerConfig)
 
 	// Consumer
 	consumerConfig := kafkaConfig.GetConsumerConfig()
@@ -69,7 +91,47 @@ func main() {
 				log.Printf("Error unmarshaling JSON: %v", err)
 			}
 
-			_, err = conn.Exec(context.Background(), "INSERT INTO EVENTS (id, type, timestamp, payload) values ($1, $2, $3, $4::jsonb)", eventJson.Id, eventJson.Type, eventJson.Timestamp, eventJson.Payload)
+			// Check For Fraud
+			accountId, exists := eventJson.Payload["accountId"]
+			expireTime, _ := strconv.Atoi(os.Getenv("FRAUD_WINDOW_SECONDS"))
+			threshold, _ := strconv.Atoi(os.Getenv("FRAUD_THRESHOLD"))
+			if exists {
+				key := fmt.Sprintf("fraud:account:%s", accountId.(string))
+				val := rdb.Incr(context.Background(), key).Val()
+				if val == int64(1) {
+					rdb.Expire(context.Background(), key, time.Duration(expireTime)*time.Second)
+				}
+				if val >= int64(threshold) {
+					fraudTopic := "fraud-alerts"
+					fmt.Printf("Fraud Account Found: account_id: %s, Count: %d, Event ID: %s\n",
+						key, val, eventJson.Id)
+
+					// Generating Fraud Alert Message
+					new_uuid := uuid.New().String()
+					var fraudAlert models.FraudAlert = models.FraudAlert{
+						AlertId:          new_uuid,
+						AccountId:        accountId.(string),
+						EventId:          eventJson.Id,
+						EventType:        eventJson.Type,
+						TransactionCount: int(val),
+						DetectedAt:       time.Now(),
+					}
+					fraudAlertBytes, err := json.Marshal(fraudAlert)
+					if err != nil {
+						fmt.Printf("Error while marshalling event json: %s\n", err)
+					}
+
+					producer.Produce(&kafka.Message{
+						TopicPartition: kafka.TopicPartition{Topic: &fraudTopic, Partition: kafka.PartitionAny},
+						Key:            []byte(fraudAlert.EventId),
+						Value:          fraudAlertBytes,
+					}, nil)
+
+				}
+
+			}
+
+			_, err = pool.Exec(context.Background(), "INSERT INTO EVENTS (id, type, timestamp, payload) values ($1, $2, $3, $4::jsonb) ON CONFLICT (id) DO NOTHING", eventJson.Id, eventJson.Type, eventJson.Timestamp, eventJson.Payload)
 			if err != nil {
 				fmt.Printf("Error while Inserting Consumed Event in DB: %v", err)
 			}
