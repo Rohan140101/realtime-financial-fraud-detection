@@ -1,3 +1,8 @@
+// Consumer Group Behavior (observed W3D1 2026-06-15):
+// - 3 partitions across 2 consumer instances: ~2:1 split (one instance owns 2 partitions)
+// - Rebalancing on instance death: surviving instance picks up all partitions within seconds
+// - No data loss observed: idempotency keys prevent duplicate DB writes on rebalance
+// - No explicit rebalancing logs from confluent-kafka-go: handled internally
 package main
 
 import (
@@ -73,11 +78,22 @@ func extractAccountId(payload map[string]interface{}) (string, bool) {
 	return accountId.(string), exists
 }
 
-func insertEvent(pool *pgxpool.Pool, event *models.Event) {
+func insertEvent(pool *pgxpool.Pool, event *models.Event, rdb *redis.Client) {
 	_, err := pool.Exec(context.Background(), "INSERT INTO EVENTS (id, type, timestamp, payload) values ($1, $2, $3, $4::jsonb) ON CONFLICT (id) DO NOTHING", event.Id, event.Type, event.Timestamp, event.Payload)
 	if err != nil {
 		fmt.Printf("Error while Inserting Consumed Event in DB: %v", err)
+	} else {
+		// Insertion was successful so we invalidate cache
+		// redis_cache_key := "cache:events:summary"
+		// Deleting Cache
+		// _, err = rdb.Del(context.Background(), redis_cache_key).Result()
+		// if err != nil {
+		// 	fmt.Printf("Error While Deleting Cache:%s\n", err)
+		// }
+		// fmt.Printf("Cache invalidated for key: %s\n", redis_cache_key)
+
 	}
+
 }
 
 func main() {
@@ -144,8 +160,8 @@ func main() {
 			if err != nil {
 				continue
 			}
-			fmt.Printf("Consumed Event from topic: %s, key: %s, value: %s\n",
-				*ev.TopicPartition.Topic, string(ev.Key), string(ev.Value))
+			fmt.Printf("Consumed Event from partition: %d, topic: %s, key: %s, value: %s\n",
+				ev.TopicPartition.Partition, *ev.TopicPartition.Topic, string(ev.Key), string(ev.Value))
 
 			var eventJson models.Event
 			err = json.Unmarshal(ev.Value, &eventJson)
@@ -159,7 +175,7 @@ func main() {
 				publishFraudAlert(producer, &eventJson, accountId, count)
 			}
 
-			insertEvent(pool, &eventJson)
+			insertEvent(pool, &eventJson, rdb)
 
 		}
 

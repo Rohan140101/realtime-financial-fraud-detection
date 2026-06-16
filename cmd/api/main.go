@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"github.com/redis/go-redis/v9"
 )
 
 func publishEvent(producer *kafka.Producer, topic string, event *models.Event) {
@@ -47,6 +48,19 @@ func main() {
 	}
 	defer pool.Close()
 
+	// Initializing Redis
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     os.Getenv("REDIS_URL"),
+		Password: "",
+		DB:       0,
+	})
+
+	_, err = rdb.Ping(context.Background()).Result()
+	if err != nil {
+		log.Fatalf("Failed to connect to Redis: %v\n", err)
+	}
+
+	// Initializing Producer
 	producerConfig := kafkaConfig.GetProducerConfig()
 	producer, err := kafka.NewProducer(&producerConfig)
 
@@ -95,41 +109,63 @@ func main() {
 	r.GET("/events/summary", func(c *gin.Context) {
 		fmt.Println("Entering Event Summary API")
 		var eventSummary models.EventSummary
-		// Getting Types and Counts
-		rows, err := pool.Query(context.Background(), `SELECT type, COUNT(id) count FROM EVENTS GROUP BY type order BY COUNT DESC;`)
+		// First Trying Redis Cache
+		redis_cache_key := "cache:events:summary"
+		res, err := rdb.Get(context.Background(), redis_cache_key).Result()
 		if err != nil {
-			fmt.Printf("Error While Computing Summary of Events: %v\n", err)
+			fmt.Println("Cache Miss, Retrieving from DB")
+			// Getting Types and Counts
+			rows, err := pool.Query(context.Background(), `SELECT type, COUNT(id) count FROM EVENTS GROUP BY type order BY COUNT DESC;`)
+			if err != nil {
+				fmt.Printf("Error While Computing Summary of Events: %v\n", err)
+			}
+			var txnType string
+			var count int32
+			eventSummary.ByType = map[string]int32{}
+			_, err = pgx.ForEachRow(rows, []any{&txnType, &count}, func() error {
+				eventSummary.ByType[txnType] = count
+				return nil
+			})
+
+			if err != nil {
+				fmt.Printf("Error While Fetching Rows of Events: %v\n", err)
+			}
+
+			// Getting Max Timestamps and overall number of events
+
+			rows, err = pool.Query(context.Background(), `SELECT MAX(timestamp) as maxTs, COUNT(id) as count FROM EVENTS;`)
+			if err != nil {
+				fmt.Printf("Error While Computing Summary of Events: %v\n", err)
+			}
+			_, err = pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (int32, error) {
+
+				var totalEvents int32
+				var latestEvent time.Time
+
+				err = row.Scan(&latestEvent, &totalEvents)
+				eventSummary.TotalEvents = totalEvents
+				eventSummary.LatestEvent = latestEvent
+				return totalEvents, err
+			})
+
+			// Storing Event Summary in Cache
+			eventJsonBytes, err := json.Marshal(eventSummary)
+			if err != nil {
+				fmt.Printf("Error while marshalling event json: %s\n", err)
+			}
+			err = rdb.Set(context.Background(), redis_cache_key, eventJsonBytes, 30*time.Second).Err()
+			if err != nil {
+				fmt.Printf("Error While Setting Cache Data: %s\n", err)
+			}
+		} else {
+			fmt.Println("Cache Hit")
+			err = json.Unmarshal([]byte(res), &eventSummary)
+			if err != nil {
+				log.Printf("Error unmarshaling JSON: %v", err)
+			}
 		}
-		var txnType string
-		var count int32
-		eventSummary.ByType = map[string]int32{}
-		_, err = pgx.ForEachRow(rows, []any{&txnType, &count}, func() error {
-			eventSummary.ByType[txnType] = count
-			return nil
-		})
 
-		if err != nil {
-			fmt.Printf("Error While Fetching Rows of Events: %v\n", err)
-		}
-
-		// Getting Max Timestamps and overall number of events
-
-		rows, err = pool.Query(context.Background(), `SELECT MAX(timestamp) as maxTs, COUNT(id) as count FROM EVENTS;`)
-		if err != nil {
-			fmt.Printf("Error While Computing Summary of Events: %v\n", err)
-		}
-		_, err = pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (int32, error) {
-
-			var totalEvents int32
-			var latestEvent time.Time
-
-			err = row.Scan(&latestEvent, &totalEvents)
-			eventSummary.TotalEvents = totalEvents
-			eventSummary.LatestEvent = latestEvent
-			return c.GetInt32(1), err
-		})
-
-		c.JSON(http.StatusAccepted, eventSummary)
+		c.JSON(http.StatusOK, eventSummary)
 
 	})
 

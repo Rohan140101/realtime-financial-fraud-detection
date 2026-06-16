@@ -124,11 +124,11 @@ args = parser.parse_args()
 rate = args.rate
 
 t1 = threading.Thread(target=send_txn, daemon=True)
-t2 = threading.Thread(target=generate_fraud, daemon=True)
+# t2 = threading.Thread(target=generate_fraud, daemon=True)
 t3 = threading.Thread(target=progress_reporting, daemon=True)
 
 t1.start()
-t2.start()
+# t2.start()
 t3.start()
 try:
     while True:
