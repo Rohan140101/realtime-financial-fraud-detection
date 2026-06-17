@@ -23,10 +23,14 @@ import (
 
 	"strconv"
 
+	"log/slog"
+
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 )
+
+var logger *slog.Logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 func detectFraud(rdb *redis.Client, event *models.Event, threshold int, expireTime int) (bool, string, int) {
 	accountId, exists := extractAccountId(event.Payload)
@@ -44,8 +48,11 @@ func detectFraud(rdb *redis.Client, event *models.Event, threshold int, expireTi
 
 func publishFraudAlert(producer *kafka.Producer, event *models.Event, accountId string, count int) {
 	fraudTopic := "fraud-alerts"
-	fmt.Printf("Fraud Account Found: account_id: %s, Count: %d, Event ID: %s\n",
-		accountId, count, event.Id)
+
+	logger.Warn("Fraud Account Found",
+		"accountId", accountId,
+		"count", count,
+		"eventId", event.Id)
 
 	// Generating Fraud Alert Message
 	new_uuid := uuid.New().String()
@@ -59,7 +66,8 @@ func publishFraudAlert(producer *kafka.Producer, event *models.Event, accountId 
 	}
 	fraudAlertBytes, err := json.Marshal(fraudAlert)
 	if err != nil {
-		fmt.Printf("Error while marshalling event json: %s\n", err)
+		logger.Error("Event JSON Marshalling Failed",
+			"error", err.Error())
 	}
 
 	producer.Produce(&kafka.Message{
@@ -79,19 +87,11 @@ func extractAccountId(payload map[string]interface{}) (string, bool) {
 	return accountId.(string), exists
 }
 
-// func getProducer() (*kafka.Producer, error) {
-// 	producerConfig := kafkaConfig.GetProducerConfig()
-// 	producer, err := kafka.NewProducer(&producerConfig)
-// 	// if err != nil {
-// 	// 	fmt.Println("Failed to Intialize Producer")
-// 	// }
-// 	return producer, err
-// }
-
 func insertEvent(pool *pgxpool.Pool, event *models.Event, rdb *redis.Client) error {
 	_, err := pool.Exec(context.Background(), "INSERT INTO EVENTS (id, type, timestamp, payload) values ($1, $2, $3, $4::jsonb) ON CONFLICT (id) DO NOTHING", event.Id, event.Type, event.Timestamp, event.Payload)
 	if err != nil {
-		fmt.Printf("Error while Inserting Consumed Event in DB: %v", err)
+		logger.Error("Consumed Event DB Insertion Failed",
+			"error", err.Error())
 		return err
 	} else {
 		// Insertion was successful so we invalidate cache
@@ -111,17 +111,24 @@ func insertEventWithRetry(pool *pgxpool.Pool, event *models.Event, rdb *redis.Cl
 	err := insertEvent(pool, event, rdb)
 	if err != nil {
 		// Retry Logic with Exponential Backoff
-		fmt.Printf("[Consumer] Failure while inserting event into Postgres : %s. Will Retry Insert %d times\n", err, maxRetries)
+		logger.Error("Failure while inserting event into Postgres",
+			"error", err.Error(),
+			"maxRetries", maxRetries)
 
 		for i := 1; i <= maxRetries; i++ {
-			fmt.Printf("Retry Attempt: %d\n", i)
+			logger.Info("Retry Attempt",
+				"retry", i)
 			time.Sleep(time.Duration(math.Pow(2, float64(i))) * time.Second)
 			err = insertEvent(pool, event, rdb)
 			if err != nil {
-				fmt.Printf("Insert Retry Attempt %d failed: %s\n", i, err)
+				logger.Error("Failed Insert",
+					"error", err.Error(),
+					"retryCount", i)
+
 				continue
 			} else {
-				fmt.Printf("Insert Retry Attempt %d Success: %s\n", i, err)
+				logger.Info("Successful Insert",
+					"retryCount", i)
 				return
 			}
 		}
@@ -133,17 +140,22 @@ func insertEventWithRetry(pool *pgxpool.Pool, event *models.Event, rdb *redis.Cl
 
 func publishDLQ(event *models.Event, producer *kafka.Producer) {
 	topic := "events-dlq"
-	fmt.Printf("Entered publishDLQ for Event ID: %s\n", event.Id)
+	logger.Info("Entered publishDLQ",
+		"eventId", event.Id)
 	eventBytes, err := json.Marshal(event)
 	if err != nil {
-		fmt.Printf("Failed to Marshal Event Object for DLQ, Event ID: %s\n", event.Id)
+		logger.Error("Event JSON Marshal failed in publishDLQ",
+			"error", err.Error(),
+			"eventId", event.Id,
+		)
 	}
 	producer.Produce(&kafka.Message{
 		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
 		Key:            []byte(event.Id),
 		Value:          eventBytes,
 	}, nil)
-	fmt.Printf("Successfully completed publishDLQ for Event ID: %s\n", event.Id)
+	logger.Info("Successfully completed publishDLQ",
+		"eventId", event.Id)
 
 }
 
@@ -154,13 +166,15 @@ func main() {
 	// Loading Env
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		logger.Error(".env file loading failed",
+			"error", err.Error())
 	}
 
 	// Initializing Postgres DB Pool
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))
 	if err != nil {
-		fmt.Printf("Failed to Initialize Pool\n")
+		logger.Error("Failed to Initialize Postgres Connection Pool",
+			"error", err.Error())
 		os.Exit(1)
 	}
 	defer pool.Close()
@@ -174,7 +188,8 @@ func main() {
 
 	_, err = rdb.Ping(context.Background()).Result()
 	if err != nil {
-		log.Fatalf("Failed to connect to Redis: %v\n", err)
+		logger.Error("Failed to connect to Redis",
+			"error", err.Error())
 	}
 
 	// Initializing Producer
@@ -182,7 +197,8 @@ func main() {
 	producer, err := kafka.NewProducer(&producerConfig)
 	// producer, err := getProducer()
 	if err != nil {
-		log.Fatalf("Failed to Create Producer: %s\n", err)
+		logger.Error("Failed to Create Producer",
+			"error", err.Error())
 		os.Exit(1)
 	}
 
@@ -191,7 +207,8 @@ func main() {
 	cons, err := kafka.NewConsumer(&consumerConfig)
 
 	if err != nil {
-		log.Fatalf("Failed to Create Consumer: %s\n", err)
+		logger.Error("Failed to Create Consumer",
+			"error", err.Error())
 		os.Exit(1)
 	}
 
@@ -201,7 +218,8 @@ func main() {
 
 	err = cons.SubscribeTopics([]string{topic}, nil)
 	if err != nil {
-		fmt.Printf("Consumer Error in Subscribing to Topics: %v\n", err)
+		logger.Error("Consumer Failure in Subscribing to Topics",
+			"error", err.Error())
 	}
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -210,20 +228,26 @@ func main() {
 	for run {
 		select {
 		case sig := <-sigChan:
-			fmt.Printf("Caught Signal %v, terminating\n", sig)
+			logger.Error("Caught Signal, terminating",
+				"signal", sig)
 			run = false
 		default:
 			ev, err := cons.ReadMessage(100 * time.Millisecond)
 			if err != nil {
 				continue
 			}
-			fmt.Printf("Consumed Event from partition: %d, topic: %s, key: %s, value: %s\n",
-				ev.TopicPartition.Partition, *ev.TopicPartition.Topic, string(ev.Key), string(ev.Value))
+			logger.Info("Event Consumed",
+				"partition", ev.TopicPartition.Partition,
+				"topic", ev.TopicPartition.Topic,
+				"key", string(ev.Key),
+				"value", string(ev.Value))
 
 			var eventJson models.Event
 			err = json.Unmarshal(ev.Value, &eventJson)
 			if err != nil {
 				log.Printf("Error unmarshaling JSON: %v", err)
+				logger.Error("JSON Unmarshalling Failed",
+					"error", err.Error())
 			}
 
 			ifFraud, accountId, count := detectFraud(rdb, &eventJson, threshold, expireTime)

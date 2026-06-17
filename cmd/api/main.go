@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"event-platform/internal/models"
-	"fmt"
-	"log"
+
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -21,10 +21,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+var logger *slog.Logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
 func publishEvent(producer *kafka.Producer, topic string, event *models.Event) {
 	eventJsonBytes, err := json.Marshal(event)
 	if err != nil {
-		fmt.Printf("Error while marshalling event json: %s\n", err)
+		logger.Error("Event JSON Unmarshalling Failed",
+			"error", err.Error())
 	}
 
 	producer.Produce(&kafka.Message{
@@ -34,16 +37,19 @@ func publishEvent(producer *kafka.Producer, topic string, event *models.Event) {
 	}, nil)
 }
 func main() {
+	// logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	err := godotenv.Load()
 	if err != nil {
-		log.Fatal("Error loading .env file")
+		logger.Error("Error loading .env file",
+			"error", err.Error())
 	}
 
 	// Initializing DB Pool
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))
 	if err != nil {
-		fmt.Printf("Failed to Initialize Pool\n")
+		logger.Error("Failed to Initialize Postgres Pool",
+			"error", err.Error())
 		os.Exit(1)
 	}
 	defer pool.Close()
@@ -57,7 +63,8 @@ func main() {
 
 	_, err = rdb.Ping(context.Background()).Result()
 	if err != nil {
-		log.Fatalf("Failed to connect to Redis: %v\n", err)
+		logger.Error("Failed to connect to Redis",
+			"error", err.Error())
 	}
 
 	// Initializing Producer
@@ -65,7 +72,8 @@ func main() {
 	producer, err := kafka.NewProducer(&producerConfig)
 
 	if err != nil {
-		log.Fatalf("Failed to Create Producer: %s\n", err)
+		logger.Error("Failed to Create Producer",
+			"error", err.Error())
 		os.Exit(1)
 	}
 
@@ -74,10 +82,16 @@ func main() {
 			switch ev := e.(type) {
 			case *kafka.Message:
 				if ev.TopicPartition.Error != nil {
-					fmt.Printf("Failed to deliver message: %v\n", ev.TopicPartition)
+					logger.Error("Failed to deliver message",
+						"partition", ev.TopicPartition.Partition,
+						"error", ev.TopicPartition.Error)
+
 				} else {
-					fmt.Printf("Produced event to topic %s: key = %-10s value = %s\n",
-						*ev.TopicPartition.Topic, string(ev.Key), string(ev.Value))
+					logger.Info("Produced Event",
+						"topic", *ev.TopicPartition.Topic,
+						"key", string(ev.Key),
+						"value", string(ev.Value),
+					)
 				}
 			}
 		}
@@ -92,6 +106,8 @@ func main() {
 		var eventJson models.Event
 
 		if err := c.ShouldBindJSON(&eventJson); err != nil {
+			logger.Error("Error in Binding Input Event",
+				"error", err.Error())
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
@@ -107,17 +123,18 @@ func main() {
 	// events/summary
 
 	r.GET("/events/summary", func(c *gin.Context) {
-		fmt.Println("Entering Event Summary API")
+		logger.Info("Entering Event Summary API")
 		var eventSummary models.EventSummary
 		// First Trying Redis Cache
 		redis_cache_key := "cache:events:summary"
 		res, err := rdb.Get(context.Background(), redis_cache_key).Result()
 		if err != nil {
-			fmt.Println("Cache Miss, Retrieving from DB")
+			logger.Info("Cache Miss, Retrieving from DB")
 			// Getting Types and Counts
 			rows, err := pool.Query(context.Background(), `SELECT type, COUNT(id) count FROM EVENTS GROUP BY type order BY COUNT DESC;`)
 			if err != nil {
-				fmt.Printf("Error While Computing Summary of Events: %v\n", err)
+				logger.Error("Event Summary Query Failed",
+					"error", err.Error())
 			}
 			var txnType string
 			var count int32
@@ -128,14 +145,16 @@ func main() {
 			})
 
 			if err != nil {
-				fmt.Printf("Error While Fetching Rows of Events: %v\n", err)
+				logger.Error("Error While Fetching Rows of Events",
+					"error", err.Error())
 			}
 
 			// Getting Max Timestamps and overall number of events
 
 			rows, err = pool.Query(context.Background(), `SELECT MAX(timestamp) as maxTs, COUNT(id) as count FROM EVENTS;`)
 			if err != nil {
-				fmt.Printf("Error While Computing Summary of Events: %v\n", err)
+				logger.Error("Error While Computing Summary of Events",
+					"error", err.Error())
 			}
 			_, err = pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (int32, error) {
 
@@ -151,17 +170,20 @@ func main() {
 			// Storing Event Summary in Cache
 			eventJsonBytes, err := json.Marshal(eventSummary)
 			if err != nil {
-				fmt.Printf("Error while marshalling event json: %s\n", err)
+				logger.Error("Event JSON Marshalling Failed",
+					"error", err.Error())
 			}
 			err = rdb.Set(context.Background(), redis_cache_key, eventJsonBytes, 30*time.Second).Err()
 			if err != nil {
-				fmt.Printf("Error While Setting Cache Data: %s\n", err)
+				logger.Error("Setting Cache Data Failed",
+					"error", err.Error())
 			}
 		} else {
-			fmt.Println("Cache Hit")
+			logger.Info("Cache Hit")
 			err = json.Unmarshal([]byte(res), &eventSummary)
 			if err != nil {
-				log.Printf("Error unmarshaling JSON: %v", err)
+				logger.Error("Event JSON Unmarshalling Failed",
+					"error", err.Error())
 			}
 		}
 
