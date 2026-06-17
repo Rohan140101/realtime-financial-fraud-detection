@@ -12,6 +12,7 @@ import (
 	"event-platform/internal/models"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"syscall"
@@ -78,10 +79,20 @@ func extractAccountId(payload map[string]interface{}) (string, bool) {
 	return accountId.(string), exists
 }
 
-func insertEvent(pool *pgxpool.Pool, event *models.Event, rdb *redis.Client) {
+// func getProducer() (*kafka.Producer, error) {
+// 	producerConfig := kafkaConfig.GetProducerConfig()
+// 	producer, err := kafka.NewProducer(&producerConfig)
+// 	// if err != nil {
+// 	// 	fmt.Println("Failed to Intialize Producer")
+// 	// }
+// 	return producer, err
+// }
+
+func insertEvent(pool *pgxpool.Pool, event *models.Event, rdb *redis.Client) error {
 	_, err := pool.Exec(context.Background(), "INSERT INTO EVENTS (id, type, timestamp, payload) values ($1, $2, $3, $4::jsonb) ON CONFLICT (id) DO NOTHING", event.Id, event.Type, event.Timestamp, event.Payload)
 	if err != nil {
 		fmt.Printf("Error while Inserting Consumed Event in DB: %v", err)
+		return err
 	} else {
 		// Insertion was successful so we invalidate cache
 		// redis_cache_key := "cache:events:summary"
@@ -91,8 +102,48 @@ func insertEvent(pool *pgxpool.Pool, event *models.Event, rdb *redis.Client) {
 		// 	fmt.Printf("Error While Deleting Cache:%s\n", err)
 		// }
 		// fmt.Printf("Cache invalidated for key: %s\n", redis_cache_key)
-
+		return nil
 	}
+
+}
+
+func insertEventWithRetry(pool *pgxpool.Pool, event *models.Event, rdb *redis.Client, maxRetries int, producer *kafka.Producer) {
+	err := insertEvent(pool, event, rdb)
+	if err != nil {
+		// Retry Logic with Exponential Backoff
+		fmt.Printf("[Consumer] Failure while inserting event into Postgres : %s. Will Retry Insert %d times\n", err, maxRetries)
+
+		for i := 1; i <= maxRetries; i++ {
+			fmt.Printf("Retry Attempt: %d\n", i)
+			time.Sleep(time.Duration(math.Pow(2, float64(i))) * time.Second)
+			err = insertEvent(pool, event, rdb)
+			if err != nil {
+				fmt.Printf("Insert Retry Attempt %d failed: %s\n", i, err)
+				continue
+			} else {
+				fmt.Printf("Insert Retry Attempt %d Success: %s\n", i, err)
+				return
+			}
+		}
+		// Call Publish DLQ
+		publishDLQ(event, producer)
+	}
+
+}
+
+func publishDLQ(event *models.Event, producer *kafka.Producer) {
+	topic := "events-dlq"
+	fmt.Printf("Entered publishDLQ for Event ID: %s\n", event.Id)
+	eventBytes, err := json.Marshal(event)
+	if err != nil {
+		fmt.Printf("Failed to Marshal Event Object for DLQ, Event ID: %s\n", event.Id)
+	}
+	producer.Produce(&kafka.Message{
+		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+		Key:            []byte(event.Id),
+		Value:          eventBytes,
+	}, nil)
+	fmt.Printf("Successfully completed publishDLQ for Event ID: %s\n", event.Id)
 
 }
 
@@ -129,6 +180,11 @@ func main() {
 	// Initializing Producer
 	producerConfig := kafkaConfig.GetProducerConfig()
 	producer, err := kafka.NewProducer(&producerConfig)
+	// producer, err := getProducer()
+	if err != nil {
+		log.Fatalf("Failed to Create Producer: %s\n", err)
+		os.Exit(1)
+	}
 
 	// Consumer
 	consumerConfig := kafkaConfig.GetConsumerConfig()
@@ -141,6 +197,7 @@ func main() {
 
 	expireTime, _ := strconv.Atoi(os.Getenv("FRAUD_WINDOW_SECONDS"))
 	threshold, _ := strconv.Atoi(os.Getenv("FRAUD_THRESHOLD"))
+	maxRetries, _ := strconv.Atoi(os.Getenv("MAX_RETRIES"))
 
 	err = cons.SubscribeTopics([]string{topic}, nil)
 	if err != nil {
@@ -175,7 +232,7 @@ func main() {
 				publishFraudAlert(producer, &eventJson, accountId, count)
 			}
 
-			insertEvent(pool, &eventJson, rdb)
+			insertEventWithRetry(pool, &eventJson, rdb, maxRetries, producer)
 
 		}
 
