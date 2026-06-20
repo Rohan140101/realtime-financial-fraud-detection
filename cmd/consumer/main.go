@@ -84,7 +84,10 @@ func extractAccountId(payload map[string]interface{}) (string, bool) {
 		return accountId.(string), exists
 	}
 	accountId, exists = payload["accountId"]
-	return accountId.(string), exists
+	if exists {
+		return accountId.(string), exists
+	}
+	return "", false
 }
 
 func insertEvent(pool *pgxpool.Pool, event *models.Event, rdb *redis.Client) error {
