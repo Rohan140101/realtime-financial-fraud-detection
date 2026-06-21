@@ -11,7 +11,6 @@ import (
 	kafkaConfig "event-platform/internal/kafka"
 	"event-platform/internal/models"
 	"fmt"
-	"log"
 	"math"
 	"os"
 	"os/signal"
@@ -25,6 +24,7 @@ import (
 
 	"log/slog"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
@@ -68,6 +68,7 @@ func publishFraudAlert(producer *kafka.Producer, event *models.Event, accountId 
 	if err != nil {
 		logger.Error("Event JSON Marshalling Failed",
 			"error", err.Error())
+		sentry.CaptureException(err)
 	}
 
 	producer.Produce(&kafka.Message{
@@ -95,6 +96,7 @@ func insertEvent(pool *pgxpool.Pool, event *models.Event, rdb *redis.Client) err
 	if err != nil {
 		logger.Error("Consumed Event DB Insertion Failed",
 			"error", err.Error())
+		sentry.CaptureException(err)
 		return err
 	} else {
 		// Insertion was successful so we invalidate cache
@@ -117,6 +119,7 @@ func insertEventWithRetry(pool *pgxpool.Pool, event *models.Event, rdb *redis.Cl
 		logger.Error("Failure while inserting event into Postgres",
 			"error", err.Error(),
 			"maxRetries", maxRetries)
+		sentry.CaptureException(err)
 
 		for i := 1; i <= maxRetries; i++ {
 			logger.Info("Retry Attempt",
@@ -127,6 +130,7 @@ func insertEventWithRetry(pool *pgxpool.Pool, event *models.Event, rdb *redis.Cl
 				logger.Error("Failed Insert",
 					"error", err.Error(),
 					"retryCount", i)
+				sentry.CaptureException(err)
 
 				continue
 			} else {
@@ -151,6 +155,7 @@ func publishDLQ(event *models.Event, producer *kafka.Producer) {
 			"error", err.Error(),
 			"eventId", event.Id,
 		)
+		sentry.CaptureException(err)
 	}
 	producer.Produce(&kafka.Message{
 		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
@@ -163,15 +168,24 @@ func publishDLQ(event *models.Event, producer *kafka.Producer) {
 }
 
 func main() {
-
 	topic := "events"
 
 	// Loading Env
 	err := godotenv.Load()
 	if err != nil {
-		logger.Error(".env file loading failed",
+		logger.Error("Error Loading .env file",
 			"error", err.Error())
 	}
+
+	// Loading Sentry
+	err = sentry.Init(sentry.ClientOptions{
+		Dsn:              os.Getenv("SENTRY_DSN"),
+		TracesSampleRate: 1.0,
+	})
+	if err != nil {
+		logger.Error("sentry init failed", "error", err.Error())
+	}
+	defer sentry.Flush(2 * time.Second)
 
 	// Initializing Postgres DB Pool
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))
@@ -193,6 +207,7 @@ func main() {
 	if err != nil {
 		logger.Error("Failed to connect to Redis",
 			"error", err.Error())
+		sentry.CaptureException(err)
 	}
 
 	// Initializing Producer
@@ -202,6 +217,7 @@ func main() {
 	if err != nil {
 		logger.Error("Failed to Create Producer",
 			"error", err.Error())
+		sentry.CaptureException(err)
 		os.Exit(1)
 	}
 
@@ -212,6 +228,7 @@ func main() {
 	if err != nil {
 		logger.Error("Failed to Create Consumer",
 			"error", err.Error())
+		sentry.CaptureException(err)
 		os.Exit(1)
 	}
 
@@ -223,6 +240,7 @@ func main() {
 	if err != nil {
 		logger.Error("Consumer Failure in Subscribing to Topics",
 			"error", err.Error())
+		sentry.CaptureException(err)
 	}
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -248,9 +266,9 @@ func main() {
 			var eventJson models.Event
 			err = json.Unmarshal(ev.Value, &eventJson)
 			if err != nil {
-				log.Printf("Error unmarshaling JSON: %v", err)
 				logger.Error("JSON Unmarshalling Failed",
 					"error", err.Error())
+				sentry.CaptureException(err)
 			}
 
 			ifFraud, accountId, count := detectFraud(rdb, &eventJson, threshold, expireTime)

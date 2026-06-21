@@ -13,6 +13,7 @@ import (
 	kafkaConfig "event-platform/internal/kafka"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
+	"github.com/getsentry/sentry-go"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -28,6 +29,7 @@ func publishEvent(producer *kafka.Producer, topic string, event *models.Event) {
 	if err != nil {
 		logger.Error("Event JSON Unmarshalling Failed",
 			"error", err.Error())
+		sentry.CaptureException(err)
 	}
 
 	producer.Produce(&kafka.Message{
@@ -37,13 +39,23 @@ func publishEvent(producer *kafka.Producer, topic string, event *models.Event) {
 	}, nil)
 }
 func main() {
-	// logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	// Loading Env
 	err := godotenv.Load()
 	if err != nil {
-		logger.Error("Error loading .env file",
+		logger.Error("Error Loading .env file",
 			"error", err.Error())
 	}
+
+	// Loading Sentry
+	err = sentry.Init(sentry.ClientOptions{
+		Dsn:              os.Getenv("SENTRY_DSN"),
+		TracesSampleRate: 1.0,
+	})
+	if err != nil {
+		logger.Error("sentry init failed", "error", err.Error())
+	}
+	defer sentry.Flush(2 * time.Second)
 
 	// Initializing DB Pool
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))
@@ -65,6 +77,7 @@ func main() {
 	if err != nil {
 		logger.Error("Failed to connect to Redis",
 			"error", err.Error())
+		sentry.CaptureException(err)
 	}
 
 	// Initializing Producer
@@ -74,6 +87,7 @@ func main() {
 	if err != nil {
 		logger.Error("Failed to Create Producer",
 			"error", err.Error())
+		sentry.CaptureException(err)
 		os.Exit(1)
 	}
 
@@ -135,6 +149,7 @@ func main() {
 			if err != nil {
 				logger.Error("Event Summary Query Failed",
 					"error", err.Error())
+				sentry.CaptureException(err)
 			}
 			var txnType string
 			var count int32
@@ -147,6 +162,7 @@ func main() {
 			if err != nil {
 				logger.Error("Error While Fetching Rows of Events",
 					"error", err.Error())
+				sentry.CaptureException(err)
 			}
 
 			// Getting Max Timestamps and overall number of events
@@ -155,6 +171,7 @@ func main() {
 			if err != nil {
 				logger.Error("Error While Computing Summary of Events",
 					"error", err.Error())
+				sentry.CaptureException(err)
 			}
 			_, err = pgx.CollectOneRow(rows, func(row pgx.CollectableRow) (int32, error) {
 
@@ -172,11 +189,13 @@ func main() {
 			if err != nil {
 				logger.Error("Event JSON Marshalling Failed",
 					"error", err.Error())
+				sentry.CaptureException(err)
 			}
 			err = rdb.Set(context.Background(), redis_cache_key, eventJsonBytes, 30*time.Second).Err()
 			if err != nil {
 				logger.Error("Setting Cache Data Failed",
 					"error", err.Error())
+				sentry.CaptureException(err)
 			}
 		} else {
 			logger.Info("Cache Hit")

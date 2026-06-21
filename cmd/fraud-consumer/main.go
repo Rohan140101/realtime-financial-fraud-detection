@@ -14,6 +14,7 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/getsentry/sentry-go"
 	"github.com/joho/godotenv"
 )
 
@@ -26,6 +27,7 @@ func insertFraudAlert(pool *pgxpool.Pool, fraudAlert *models.FraudAlert) error {
 	if err != nil {
 		logger.Error("Consumed Fraud DB Insertion Failed",
 			"error", err.Error())
+		sentry.CaptureException(err)
 		return err
 	}
 	return nil
@@ -43,6 +45,16 @@ func main() {
 			"error", err.Error())
 	}
 
+	// Loading Sentry
+	err = sentry.Init(sentry.ClientOptions{
+		Dsn:              os.Getenv("SENTRY_DSN"),
+		TracesSampleRate: 1.0,
+	})
+	if err != nil {
+		logger.Error("sentry init failed", "error", err.Error())
+	}
+	defer sentry.Flush(2 * time.Second)
+
 	// Initializing Postgres DB Pool
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))
 	if err != nil {
@@ -59,6 +71,7 @@ func main() {
 	if err != nil {
 		logger.Error("Failed to Create Fraud Consumer",
 			"error", err.Error())
+		sentry.CaptureException(err)
 		os.Exit(1)
 	}
 
@@ -67,6 +80,7 @@ func main() {
 		logger.Error("Failed to Create Fraud Consumer",
 			"topic", fraudTopic,
 			"error", err.Error())
+		sentry.CaptureException(err)
 	}
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -94,6 +108,7 @@ func main() {
 			if err != nil {
 				logger.Info("Fraud Alert Unmarshalling Failed",
 					"error", err.Error())
+				sentry.CaptureException(err)
 			}
 
 			insertFraudAlert(pool, &fraudAlert)
