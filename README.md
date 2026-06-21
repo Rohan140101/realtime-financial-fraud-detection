@@ -2,7 +2,7 @@
 
 ## Description
 
-Event Platform is a backend system for ingesting, processing, and analyzing financial transaction events at scale.
+Financial Fraud Detection Platform is a backend system for ingesting, processing, and analyzing financial transaction events at scale. The system also detects frauds and flags them.
 
 The project is built around an event-driven architecture. Incoming events are accepted through a REST API and immediately published to Apache Kafka. A separate consumer service processes those events and stores them in PostgreSQL. Analytics endpoints are accelerated with Redis caching, and the long-term deployment target is AWS EKS.
 
@@ -163,3 +163,10 @@ Docker provides a consistent local development environment and simplifies deploy
 ### AWS EKS
 
 The production deployment target is Kubernetes on AWS EKS, allowing services to scale independently based on workload.
+
+## Architecture Decisions
+
+- Idempotency Keys: Used to make sure that duplicate records are never inserted in any tables.
+- Consumer Groups: Helps to achieve parallelism and fault tolerance.
+- DLQ with Expontential Backoff: Captures events that fail processing after 3 retries with exponential backoff, preventing silent data loss in a financial system.
+- Cache-Aside with TTL Only Invalidation: Helps with Quick Access of data as well as only keeping the most updated piece of data in cache as we invalidate on expiry of a TTL as well as when a new entry is udapted in the main data
