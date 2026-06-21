@@ -1,4 +1,4 @@
-# Event Platform
+# Realtime Financial Fraud Detection Platform
 
 ## Description
 
