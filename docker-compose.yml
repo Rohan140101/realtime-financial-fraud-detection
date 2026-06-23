@@ -21,5 +21,39 @@ services:
     ports:
       - "6379:6379"
 
+  api: 
+    build: 
+      context: .
+      dockerfile: docker/api.Dockerfile
+    env_file: .env.docker
+    ports:
+      - "8080:8080"
+    depends_on: 
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+
+  consumer: 
+    build: 
+      context: .
+      dockerfile: docker/consumer.Dockerfile
+    env_file: .env.docker
+    depends_on: 
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_started
+
+  fraud-consumer: 
+    build: 
+      context: .
+      dockerfile: docker/fraud-consumer.Dockerfile
+    env_file: .env.docker
+    depends_on: 
+      db:
+        condition: service_healthy
+    
+
 volumes:
   db-data:
