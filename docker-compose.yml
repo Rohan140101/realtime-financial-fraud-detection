@@ -34,6 +34,39 @@ services:
       cache:
         condition: service_started
 
+  redpanda:
+    image: redpandadata/redpanda:v23.2.17
+    command: 
+      - redpanda start
+      - --smp 1
+      - --overprovisioned
+      - --memory=512M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+    ports: 
+    - "19092:19092"
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "health"]
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+
+  console:
+    image: docker.redpanda.com/redpandadata/console:v2.3.8
+    restart: on-failure
+    entrypoint: /bin/sh
+    command: -c "echo \"$$CONSOLE_CONFIG_FILE\" > /tmp/config.yml; /app/console"
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      CONSOLE_CONFIG_FILE: |
+        kafka:
+          brokers: ["redpanda:9092"]
+    ports:
+      - "8085:8080"
+    depends_on:
+      - redpanda
+
   consumer: 
     build: 
       context: .
@@ -57,3 +90,4 @@ services:
 
 volumes:
   db-data:
+  redpanda_data:
