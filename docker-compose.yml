@@ -33,6 +33,8 @@ services:
         condition: service_healthy
       cache:
         condition: service_started
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "api"}]'
 
   redpanda:
     image: redpandadata/redpanda:v23.2.17
@@ -77,6 +79,8 @@ services:
         condition: service_healthy
       cache:
         condition: service_started
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "consumer"}]'
 
   fraud-consumer: 
     build: 
@@ -86,6 +90,32 @@ services:
     depends_on: 
       db:
         condition: service_healthy
+    labels:
+      com.datadoghq.ad.logs: '[{"source": "go", "service": "fraud-consumer"}]'
+
+  datadog-agent:
+    image: gcr.io/datadoghq/agent:7
+    environment:
+      DD_API_KEY: ${DATADOG_API_KEY}
+      DD_SITE: us5.datadoghq.com
+      DD_APM_ENABLED: "true"
+      DD_APM_NON_LOCAL_TRAFFIC: "true"
+      DD_APM_RECEIVER_PORT: "8126"
+      DD_APM_DD_URL: "https://trace.agent.us5.datadoghq.com"
+      DD_LOGS_ENABLED: "true"
+      DD_LOGS_CONFIG_CONTAINER_COLLECT_ALL: "true"
+      DD_CONTAINER_EXCLUDE: "name:datadog-agent"
+      DD_PROCESS_AGENT_ENABLED: "true"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /proc/:/host/proc/:ro
+      - /sys/fs/cgroup/:/host/sys/fs/cgroup:ro
+    ports:
+      - "8126:8126"
+    depends_on:
+      - api
+      - consumer
+      - fraud-consumer
     
 
 volumes:

@@ -14,6 +14,7 @@ import (
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
 	"github.com/getsentry/sentry-go"
 	"github.com/joho/godotenv"
 )
@@ -54,6 +55,14 @@ func main() {
 		logger.Error("sentry init failed", "error", err.Error())
 	}
 	defer sentry.Flush(2 * time.Second)
+
+	// Loading Datadog
+	tracer.Start(
+		tracer.WithService("fraud-onsumer"),
+		tracer.WithEnv("dev"),
+		tracer.WithAgentAddr("datadog-agent:8126"),
+	)
+	defer tracer.Stop()
 
 	// Initializing Postgres DB Pool
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))

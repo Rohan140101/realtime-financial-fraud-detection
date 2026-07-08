@@ -24,6 +24,7 @@ import (
 
 	"log/slog"
 
+	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
 	"github.com/getsentry/sentry-go"
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -186,6 +187,14 @@ func main() {
 		logger.Error("sentry init failed", "error", err.Error())
 	}
 	defer sentry.Flush(2 * time.Second)
+
+	// Loading Datadog
+	tracer.Start(
+		tracer.WithService("consumer"),
+		tracer.WithEnv("dev"),
+		tracer.WithAgentAddr("datadog-agent:8126"),
+	)
+	defer tracer.Stop()
 
 	// Initializing Postgres DB Pool
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))

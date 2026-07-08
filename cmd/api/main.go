@@ -12,6 +12,9 @@ import (
 
 	kafkaConfig "event-platform/internal/kafka"
 
+	gintrace "github.com/DataDog/dd-trace-go/contrib/gin-gonic/gin/v2"
+	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
+
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 	"github.com/getsentry/sentry-go"
 	"github.com/gin-gonic/gin"
@@ -56,6 +59,14 @@ func main() {
 		logger.Error("sentry init failed", "error", err.Error())
 	}
 	defer sentry.Flush(2 * time.Second)
+
+	// Loading Datadog
+	tracer.Start(
+		tracer.WithAgentAddr("datadog-agent:8126"),
+		tracer.WithService("api"),
+		tracer.WithEnv("dev"),
+	)
+	defer tracer.Stop()
 
 	// Initializing DB Pool
 	pool, err := pgxpool.New(context.Background(), os.Getenv("DB_URL"))
@@ -112,6 +123,7 @@ func main() {
 	}()
 
 	r := gin.Default()
+	r.Use(gintrace.Middleware("api"))
 	topic := "events"
 
 	// POST Endpoints
